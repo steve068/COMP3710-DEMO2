@@ -160,3 +160,49 @@ if __name__ == '__main__':
     # 训练结束后，保存模型的权重字典
     torch.save(model.state_dict(), "vae_oasis_weights.pth")
     print("Training complete! The model weights have been saved as vae_oasis_weights.pth")
+
+
+# ================= 5. Manifold Visualization (流形可视化) =================
+def visualize_manifold(model, device, num_images=10, img_size=128, latent_dim=128):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    print("正在生成流形可视化图像 (vae_manifold.png)...")
+    model.eval()
+
+    # 创建一个 10x10 的网格，在标准正态分布的范围内 (-3 到 3) 进行均匀采样
+    grid_x = torch.linspace(-3, 3, num_images)
+    grid_y = torch.linspace(-3, 3, num_images)
+
+    # 创建一个大画布用来存放拼起来的 100 张图像
+    manifold = torch.zeros((img_size * num_images, img_size * num_images))
+
+    with torch.no_grad():
+        for i, yi in enumerate(grid_x):
+            for j, xi in enumerate(grid_y):
+                # 初始化一个全为 0 的潜在向量 [1, 128]
+                z = torch.zeros(1, latent_dim).to(device)
+                # 改变前两个维度的值，探索潜在空间的 2D 切面
+                z[0, 0] = xi
+                z[0, 1] = yi
+
+                # 将 z 送入解码器生成图像
+                out = model.fc_decode(z)
+                out = out.view(out.size(0), 256, 8, 8)
+                sample = model.decoder(out)
+
+                # 将生成的 128x128 图像放入大画布的对应位置
+                sample = sample.squeeze().cpu()
+                manifold[i * img_size: (i + 1) * img_size, j * img_size: (j + 1) * img_size] = sample
+
+    # 保存图像到当前目录
+    plt.figure(figsize=(10, 10))
+    plt.imshow(manifold.numpy(), cmap='gray')
+    plt.axis('off')
+    plt.savefig('vae_manifold.png', bbox_inches='tight')
+    plt.close()
+    print("流形可视化图像保存成功！")
+
+
+# 调用可视化函数
+visualize_manifold(model, DEVICE, latent_dim=128)
