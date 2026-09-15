@@ -136,35 +136,94 @@ class UNet(nn.Module):
         return out
 
 
-# ================= 测试数据管道与 UNet 前向传播 =================
+import torch.optim as optim
+
+
+# ================= 3. Metrics: Dice Similarity Coefficient (DSC) =================
+def compute_dsc(preds, targets, num_classes=4):
+    """
+    计算多类别的宏平均 Dice 分数 (Macro-average DSC)
+    preds: 模型的输出 logits, 形状 [Batch, Classes, H, W]
+    targets: 真实标签, 形状 [Batch, H, W]
+    """
+    # 将 logits 转换为预测的类别索引 (argmax)
+    preds = torch.argmax(preds, dim=1)  # 形状变为 [Batch, H, W]
+
+    dsc_per_class = []
+    for c in range(num_classes):
+        # 提取当前类别的二值掩码 (0和1)
+        pred_c = (preds == c).float()
+        target_c = (targets == c).float()
+
+        intersection = (pred_c * target_c).sum()
+        union = pred_c.sum() + target_c.sum()
+
+        # 避免除以 0 (如果预测和真实图中都没有这个类别，得分为 1.0)
+        if union == 0:
+            dsc_per_class.append(1.0)
+        else:
+            dsc_per_class.append((2. * intersection / union).item())
+
+    # 返回所有类别的平均 DSC
+    return sum(dsc_per_class) / num_classes
+
+
+# ================= 4. Training Loop (UNet 训练循环) =================
 if __name__ == '__main__':
-    # 路径配置
+    # 超参数配置
+    BATCH_SIZE = 16  # 分割任务比较吃显存，设为 16 比较安全
+    EPOCHS = 30  # 目标是 DSC > 0.9，跑 30 轮看看收敛情况
+    LEARNING_RATE = 1e-3
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {DEVICE}")
+
+    # 数据加载
     TRAIN_IMG_DIR = "/home/groups/comp3710/OASIS/keras_png_slices_train"
     TRAIN_MASK_DIR = "/home/groups/comp3710/OASIS/keras_png_slices_seg_train"
+    dataset = OASISSegmentationDataset(TRAIN_IMG_DIR, TRAIN_MASK_DIR)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    try:
-        # 1. 测试数据管道
-        dataset = OASISSegmentationDataset(TRAIN_IMG_DIR, TRAIN_MASK_DIR)
-        dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
-        images, masks = next(iter(dataloader))
-        print("--- 数据管道测试 ---")
-        print(f"输入图像 (X) 形状: {images.shape}")
-        print(f"标签掩码 (Y) 形状: {masks.shape}")
+    # 初始化模型、损失函数和优化器
+    model = UNet(in_channels=1, out_channels=4).to(DEVICE)
 
-        # 2. 测试 UNet 前向传播
-        print("\n--- UNet 前向传播测试 ---")
-        model = UNet(in_channels=1, out_channels=4)
+    # 交叉熵损失 (内部已包含 Softmax 处理，适合多分类分割)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        # 将图像输入模型进行前向传播
-        outputs = model(images)
+    print("Starting to train the UNet image segmentation model...")
+    model.train()
 
-        print(f"模型输出预测 形状: {outputs.shape}")
+    for epoch in range(EPOCHS):
+        epoch_loss = 0
+        epoch_dsc = 0
 
-        # 验证输出规格是否正确 (期望: [Batch=4, Classes=4, H=128, W=128])
-        if outputs.shape == (4, 4, 128, 128):
-            print("✅ 前向传播测试通过：输出张量形状正确，跳跃连接正常运行。")
-        else:
-            print("❌ 输出形状错误。")
+        for batch_idx, (images, masks) in enumerate(dataloader):
+            # 将数据送入 GPU
+            images = images.to(DEVICE)
+            masks = masks.to(DEVICE)
 
-    except Exception as e:
-        print(f"遇到错误: {e}")
+            # 梯度清零
+            optimizer.zero_grad()
+
+            # 前向传播
+            outputs = model(images)
+
+            # 计算损失
+            loss = criterion(outputs, masks)
+
+            # 反向传播与权重更新
+            loss.backward()
+            optimizer.step()
+
+            # 累加指标
+            epoch_loss += loss.item()
+            epoch_dsc += compute_dsc(outputs, masks)
+
+        # 计算并打印本 Epoch 的平均指标
+        avg_loss = epoch_loss / len(dataloader)
+        avg_dsc = epoch_dsc / len(dataloader)
+        print(f"Epoch [{epoch + 1}/{EPOCHS}] | Loss: {avg_loss:.4f} | 平均 DSC: {avg_dsc:.4f}")
+
+    # 训练结束后保存权重
+    torch.save(model.state_dict(), "unet_oasis_weights.pth")
+    print("Training complete! Weights have been saved as unet_oasis_weights.pth")
