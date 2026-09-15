@@ -94,7 +94,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 # ================= 3. Loss Function =================
-def vae_loss(recon_x, x, mu, logvar):
+def vae_loss(recon_x, x, mu, logvar, beta=0.01): # <--- 新增 beta 参数
     # 1. Reconstruction Loss(重建损失): 计算生成图和原图的均方误差 (MSE)
     # 使用 reduction='sum' 将 batch 内所有像素的误差累加
     RECON = F.mse_loss(recon_x, x, reduction='sum')
@@ -103,8 +103,8 @@ def vae_loss(recon_x, x, mu, logvar):
     # 理论推导公式: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-    # 最终 Loss 是两者的总和
-    return RECON + KLD
+    # 最终 Loss: 降低 KLD 的权重，缓解后验坍塌 (Posterior Collapse)
+    return RECON + beta * KLD
 
 
 # ================= 4. Training Loop =================
@@ -145,8 +145,8 @@ if __name__ == '__main__':
             # 前向传播 (Forward)
             recon_batch, mu, logvar = model(data)
 
-            # 计算损失 (Loss)
-            loss = vae_loss(recon_batch, data, mu, logvar)
+            # 计算损失 (Loss) 显式传入 beta 权重
+            loss = vae_loss(recon_batch, data, mu, logvar, beta=0.01)
 
             # 反向传播 (Backward) 与 权重更新
             loss.backward()
