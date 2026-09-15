@@ -193,11 +193,21 @@ def visualize_segmentation(model_path, img_dir, mask_dir, num_samples=3):
     images = images.to(device)
     true_masks = true_masks.to(device)
 
-    # 3. 前向传播进行预测 (不需要计算梯度)
+    # 3. 前向传播进行预测 (不需要计算梯度) + 当场计算 DSC
     with torch.no_grad():
-        preds = model(images)
+        logits = model(images)  # 获取原始模型输出
+
+        # 调用第 3 部分已经定义好的 compute_dsc 函数来算分
+        # 因为数据在 GPU 上，所以需要把 true_masks 也传进去
+        test_dsc = compute_dsc(logits, true_masks)
+
         # 将 [Batch, 4, H, W] 的概率分布转化为具体的类别索引 [Batch, H, W]
-        preds = torch.argmax(preds, dim=1)
+        preds = torch.argmax(logits, dim=1)
+
+    # [新增核心点]：把算出来的分数打印到终端上！
+    print(f"\n The average DSC score for these {num_samples} test images is: {test_dsc:.4f}")
+    if test_dsc > 0.9:
+        print("The test set DSC > 0.9, meeting requirements!\n")
 
         # 4. 准备绘图 (转移到 CPU)
     images = images.cpu()
