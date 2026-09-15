@@ -168,62 +168,82 @@ def compute_dsc(preds, targets, num_classes=4):
     return sum(dsc_per_class) / num_classes
 
 
-# ================= 4. Training Loop (UNet 训练循环) =================
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+
+
+# ================= 5. Inference & Visualization (推理与可视化) =================
+def visualize_segmentation(model_path, img_dir, mask_dir, num_samples=3):
+    """
+    加载模型权重并在测试集上进行可视化推理
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1. 初始化模型并加载权重
+    model = UNet(in_channels=1, out_channels=4).to(device)
+    # 设置 weights_only=True 提升安全性，避免加载不可信的模型
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    model.eval()  # 开启评估模式，关闭 Dropout 和 BatchNorm 的动态更新
+
+    # 2. 加载测试集数据 (注意这里换成了 test 路径)
+    dataset = OASISSegmentationDataset(img_dir, mask_dir)
+    dataloader = DataLoader(dataset, batch_size=num_samples, shuffle=True)
+    images, true_masks = next(iter(dataloader))  # 随机抽取一批图像
+
+    images = images.to(device)
+    true_masks = true_masks.to(device)
+
+    # 3. 前向传播进行预测 (不需要计算梯度)
+    with torch.no_grad():
+        preds = model(images)
+        # 将 [Batch, 4, H, W] 的概率分布转化为具体的类别索引 [Batch, H, W]
+        preds = torch.argmax(preds, dim=1)
+
+        # 4. 准备绘图 (转移到 CPU)
+    images = images.cpu()
+    true_masks = true_masks.cpu()
+    preds = preds.cpu()
+
+    # 为 4 个类别定义特定的颜色映射
+    # 类别 0: 背景 (黑色)
+    # 类别 1: 脑脊液 (红色)
+    # 类别 2: 灰质 (绿色)
+    # 类别 3: 白质 (蓝色)
+    cmap = mcolors.ListedColormap(['black', 'red', 'green', 'blue'])
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    # 创建一块画布
+    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4 * num_samples))
+
+    for i in range(num_samples):
+        # 绘制原图
+        axes[i, 0].imshow(images[i].squeeze(), cmap='gray')
+        axes[i, 0].set_title("Original MRI" if i == 0 else "")
+        axes[i, 0].axis('off')
+
+        # 绘制真实标签 (Ground Truth)
+        axes[i, 1].imshow(true_masks[i], cmap=cmap, norm=norm)
+        axes[i, 1].set_title("Ground Truth Mask" if i == 0 else "")
+        axes[i, 1].axis('off')
+
+        # 绘制模型的预测结果 (Prediction)
+        axes[i, 2].imshow(preds[i], cmap=cmap, norm=norm)
+        axes[i, 2].set_title("Model Prediction" if i == 0 else "")
+        axes[i, 2].axis('off')
+
+    plt.tight_layout()
+    plt.savefig("unet_segmentation_demo.png", bbox_inches='tight', dpi=150)
+    print("Success! The visualization result has been saved as unet_segmentation_demo.png")
+
+
 if __name__ == '__main__':
-    # 超参数配置
-    BATCH_SIZE = 16  # 分割任务比较吃显存，设为 16 比较安全
-    EPOCHS = 30  # 目标是 DSC > 0.9，跑 30 轮看看收敛情况
-    LEARNING_RATE = 1e-3
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {DEVICE}")
+    # 注意：这里改为了 _test 测试集文件夹，以证明模型的泛化能力
+    TEST_IMG_DIR = "/home/groups/comp3710/OASIS/keras_png_slices_test"
+    TEST_MASK_DIR = "/home/groups/comp3710/OASIS/keras_png_slices_seg_test"
 
-    # 数据加载
-    TRAIN_IMG_DIR = "/home/groups/comp3710/OASIS/keras_png_slices_train"
-    TRAIN_MASK_DIR = "/home/groups/comp3710/OASIS/keras_png_slices_seg_train"
-    dataset = OASISSegmentationDataset(TRAIN_IMG_DIR, TRAIN_MASK_DIR)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # 刚才跑出来的满分权重文件
+    MODEL_WEIGHTS = "unet_oasis_weights.pth"
 
-    # 初始化模型、损失函数和优化器
-    model = UNet(in_channels=1, out_channels=4).to(DEVICE)
-
-    # 交叉熵损失 (内部已包含 Softmax 处理，适合多分类分割)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-    print("Starting to train the UNet image segmentation model...")
-    model.train()
-
-    for epoch in range(EPOCHS):
-        epoch_loss = 0
-        epoch_dsc = 0
-
-        for batch_idx, (images, masks) in enumerate(dataloader):
-            # 将数据送入 GPU
-            images = images.to(DEVICE)
-            masks = masks.to(DEVICE)
-
-            # 梯度清零
-            optimizer.zero_grad()
-
-            # 前向传播
-            outputs = model(images)
-
-            # 计算损失
-            loss = criterion(outputs, masks)
-
-            # 反向传播与权重更新
-            loss.backward()
-            optimizer.step()
-
-            # 累加指标
-            epoch_loss += loss.item()
-            epoch_dsc += compute_dsc(outputs, masks)
-
-        # 计算并打印本 Epoch 的平均指标
-        avg_loss = epoch_loss / len(dataloader)
-        avg_dsc = epoch_dsc / len(dataloader)
-        print(f"Epoch [{epoch + 1}/{EPOCHS}] | Loss: {avg_loss:.4f} | 平均 DSC: {avg_dsc:.4f}")
-
-    # 训练结束后保存权重
-    torch.save(model.state_dict(), "unet_oasis_weights.pth")
-    print("Training complete! Weights have been saved as unet_oasis_weights.pth")
+    print("Starting model inference on the test set...")
+    visualize_segmentation(MODEL_WEIGHTS, TEST_IMG_DIR, TEST_MASK_DIR, num_samples=4)
