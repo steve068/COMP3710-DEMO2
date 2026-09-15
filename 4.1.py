@@ -47,8 +47,11 @@ class VAE(nn.Module):
             nn.ReLU()
         )
 
-        # 展平后的特征数：256通道 * 8宽 * 8高 = 16384
+        # 经过上面 4 次缩放，图片变成了 256个通道，大小是 8x8。
+        # 展平后总共的数字个数是：256 * 8 * 8 = 16384。
+        # 用全连接层 (Linear) 把这 16384 个特征映射为长度为 latent_dim (默认128) 的均值向量。
         self.fc_mu = nn.Linear(16384, latent_dim)
+        # 同理，映射出长度为 128 的对数方差向量。
         self.fc_logvar = nn.Linear(16384, latent_dim)
 
         # 解码器: 将隐向量恢复为图片
@@ -65,9 +68,9 @@ class VAE(nn.Module):
         )
 
     def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+        std = torch.exp(0.5 * logvar) #std标准差
+        eps = torch.randn_like(std) #随机噪声 (epsilon)
+        return mu + eps * std #得到结果 z 既有随机性，又有 mu 和 logvar 的梯度，模型就可以正常反向传播Backpropagation
 
     def forward(self, x):
         # 编码
@@ -85,13 +88,75 @@ class VAE(nn.Module):
         out = self.decoder(out)
 
         return out, mu, logvar
+
+
+import torch.optim as optim
+import torch.nn.functional as F
+
+# ================= 3. Loss Function =================
+def vae_loss(recon_x, x, mu, logvar):
+    # 1. Reconstruction Loss(重建损失): 计算生成图和原图的均方误差 (MSE)
+    # 使用 reduction='sum' 将 batch 内所有像素的误差累加
+    RECON = F.mse_loss(recon_x, x, reduction='sum')
+
+    # 2. KL Divergence(KL 散度): 衡量预测分布与标准正态分布的差异
+    # 理论推导公式: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+    # 最终 Loss 是两者的总和
+    return RECON + KLD
+
+
+# ================= 4. Training Loop =================
 if __name__ == '__main__':
-    # 模拟一张脑部图像张量输入到模型中测试
-    dummy_input = torch.randn(32, 1, 128, 128)
-    print(f"输入形状: {dummy_input.shape}")
+    # 超参数设置
+    BATCH_SIZE = 32
+    EPOCHS = 30  # 初始设为 30 轮，A100 跑起来很快
+    LEARNING_RATE = 1e-3
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Currently used computing device: {DEVICE}")
 
-    model = VAE(latent_dim=128)
-    reconstructed_img, mu, logvar = model(dummy_input)
+    # 数据加载
+    train_dir = "/home/groups/comp3710/OASIS/keras_png_slices_train"
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor()
+    ])
+    dataset = OASISDataset(train_dir, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    print(f"重建出来的图像形状: {reconstructed_img.shape}")
-    print(f"均值 (mu) 形状: {mu.shape}")
+    # 初始化模型和优化器
+    model = VAE(latent_dim=128).to(DEVICE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    # 开始训练
+    print("Starting to train the VAE model...")
+    model.train()
+
+    for epoch in range(EPOCHS):
+        train_loss = 0
+        for batch_idx, data in enumerate(dataloader):
+            # 将数据加载到显卡
+            data = data.to(DEVICE)
+
+            # 梯度清零
+            optimizer.zero_grad()
+
+            # 前向传播 (Forward)
+            recon_batch, mu, logvar = model(data)
+
+            # 计算损失 (Loss)
+            loss = vae_loss(recon_batch, data, mu, logvar)
+
+            # 反向传播 (Backward) 与 权重更新
+            loss.backward()
+            train_loss += loss.item()
+            optimizer.step()
+
+        # 打印每个 epoch 的平均损失
+        avg_loss = train_loss / len(dataset)
+        print(f"Epoch [{epoch + 1}/{EPOCHS}] | Average Loss: {avg_loss:.4f}")
+
+    # 训练结束后，保存模型的权重字典
+    torch.save(model.state_dict(), "vae_oasis_weights.pth")
+    print("Training complete! The model weights have been saved as vae_oasis_weights.pth")
